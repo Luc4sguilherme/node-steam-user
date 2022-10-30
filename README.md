@@ -2,7 +2,6 @@
 ### Allows interaction with the Steam network via the Steam client protocol
 [![npm version](https://img.shields.io/npm/v/steam-user.svg)](https://npmjs.com/package/steam-user)
 [![npm downloads](https://img.shields.io/npm/dm/steam-user.svg)](https://npmjs.com/package/steam-user)
-[![dependencies](https://img.shields.io/david/DoctorMcKay/node-steam-user.svg)](https://david-dm.org/DoctorMcKay/node-steam-user)
 [![license](https://img.shields.io/npm/l/steam-user.svg)](https://github.com/DoctorMcKay/node-steam-user/blob/master/LICENSE)
 [![paypal](https://img.shields.io/badge/paypal-donate-yellow.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=N36YVAT42CZ4G&item_name=node%2dsteam%2duser&currency_code=USD)
 
@@ -200,6 +199,52 @@ Added in 3.3.0.
 
 Defaults to `60000`. Minimum value `1000`, although you're recommended to not go below 10 seconds or so.
 
+### ownershipFilter
+
+Specify a custom app/package ownership filter object or function to be applied to all calls to `getOwned*()` and `owns*()`
+where a filter is not specified in the method invocation. If you specify a `filter` when you call `getOwned*()` or `owns*()`,
+then that filter is applied and the global `ownershipFilter` is ignored.
+
+Added in 4.22.0.
+
+Defaults to a filter that excludes expired licenses only.
+
+This filter can be either an object or a function:
+
+#### Filter Object
+
+A filter object should contain zero or more of these properties:
+
+- `excludeFree` - Pass `true` to exclude free licenses (no cost/guest pass/free on demand/free commercial license)
+- `excludeShared` - Pass `true` to exclude licenses acquired via [family sharing](https://store.steampowered.com/promotion/familysharing)
+- `excludeExpiring` - Pass `true` to exclude licenses that have an expiration date (e.g. free weekends) but are not yet expired
+
+Any omitted properties are assumed to be `false`. If you don't specify an ownership filter, an empty object is assumed.
+
+#### Filter Function
+
+You can also provide your own custom filter function. This function will be called for each license owned by your account,
+and should return `true` to include a license or `false` to exclude it. This function should have the same arguments
+as the callback you'd pass to [Array.prototype.filter](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/filter).
+
+The `element` argument will be an object of type
+[Proto_CMsgClientLicenseList_License](https://github.com/DoctorMcKay/node-steam-user/blob/9312326c34fed69a2ea6c4102ed25e3073f0516d/protobufs/generated/_types.js#L9755-L9775)
+(same as the [`licenses`](#licenses) property).
+
+Please note that when you specify a custom filter function, expired licenses (e.g. past free weekends) will be sent to
+your filter function as candidates for inclusion, but these licenses are filtered out in all other cases. You can determine
+if a license is expired by checking `if (license.flags & SteamUser.ELicenseFlags.Expired)`.
+
+Example usage:
+
+```js
+user.setOption('ownershipFilter', (license) => {
+	// only passes licenses that were acquired at least a year ago
+	let time = Math.floor(Date.now() / 1000);
+	return time - license.time_created >= 60 * 60 * 24 * 365;
+});
+```
+
 ### additionalHeaders
 
 Set this to an object where keys are header names and values are header values, and those headers will be included
@@ -258,6 +303,15 @@ Added in 4.6.0.
 
 Defaults to `false`.
 
+### saveAppTickets
+
+If true, then calls to [`getAppOwnershipTicket`](https://github.com/DoctorMcKay/node-steam-user/wiki/Steam-App-Auth#getappownershipticketappid-callback)
+will save ownership tickets to disk and will return cached tickets unless they are expired.
+
+Added in 3.5.0.
+
+Defaults to `true`.
+
 # Properties [^](#contents)
 
 ### steamID
@@ -292,7 +346,7 @@ URL). Falsy if you don't have one.
 An object containing information about your account. `null` until [`accountInfo`](#accountinfo-1) is emitted.
 
 - `name` - Your account's Steam (persona) name
-- `country` - The character code from which you're logging in (via GeoIP), e.g. "US"
+- `country` - The country code from which you're logging in (via GeoIP), e.g. "US"
 - `authedMachines` - How many machines are authorized to login to your account with Steam Guard
 - `flags` - Your account's bitwise [flags](https://github.com/SteamRE/SteamKit/blob/b80cdf5249891d54c655e39262d8267c7b40b249/Resources/SteamLanguage/enums.steamd#L81-L113)
 - `facebookID` - If your account is linked with Facebook, this is your Facebook account ID
@@ -434,7 +488,7 @@ Contains the name of this package. The value is always `"steam-user"`. This allo
 
 **v4.2.0 or later is required to use this property**
 
-Contains the version of this page. For example, `"4.2.0"`. This allows other modules to verify interoperability.
+Contains the version of this package. For example, `"4.2.0"`. This allows other modules to verify interoperability.
 
 # Methods [^](#contents)
 
@@ -466,6 +520,7 @@ You can provide either an entire sentryfile (preferred), or a Buffer containing 
 
 ### logOn([details])
 - `details` - An object containing details for this logon
+	- `refreshToken` - A refresh token, [see below](#using-refresh-tokens)
 	- `accountName` - If logging into a user account, the account's name
 	- `password` - If logging into an account without a login key or a web logon token, the account's password
 	- `loginKey` - If logging into an account with a login key, this is the account's login key
@@ -481,15 +536,33 @@ You can provide either an entire sentryfile (preferred), or a Buffer containing 
 	- `dontRememberMachine` - If you're providing an `authCode` but you don't want Steam to remember this sentryfile, pass `true` here.
 
 **v3.11.0 or later is required to use `machineName` or `dontRememberMachine`.**  
-**v4.3.0 or later is required to use `webLogonToken`.**
+**v4.3.0 or later is required to use `webLogonToken`.**  
+**v4.25.0 or later is required to use `refreshToken`.**
 
 Logs onto Steam. Omit the `details` object if you wish to login to an anonymous user account.
 
-There are four ways to log onto Steam:
+There are five ways to log onto Steam:
 
 - Anonymously
 	- Omit `accountName` (or the `details` object entirely) and you will log onto an anonymous user account.
-- Individually using account name and password
+- Individually using a refresh token **(recommended)**
+	- These properties are required:
+        - `refreshToken`
+    - These properties are optional:
+        - `steamID` - If provided, steam-user will check to make sure that the provided `refreshToken` matches this SteamID. If SteamIDs don't match, the app will crash.
+        - `logonID` - Defaults to 0 if not specified.
+        - `machineName` - Defaults to empty string if not specified.
+        - `clientOS` - Defaults to an auto-detected value if not specified.
+    - These properties must not be provided:
+        - `accountName`
+        - `password`
+        - `loginKey`
+        - `webLogonToken`
+        - `authCode`
+        - `twoFactorCode`
+        - `rememberPassword`
+        - `dontRememberMachine`
+- Individually using account name and password (deprecated)
 	- These properties are required:
 		- `accountName`
 		- `password`
@@ -505,7 +578,7 @@ There are four ways to log onto Steam:
 		- `loginKey`
 		- `webLogonToken`
 		- `steamID`
-- Individually using account name and login key
+- Individually using account name and login key (deprecated)
 	- These properties are required:
 		- `accountName`
 		- `loginKey`
@@ -521,7 +594,7 @@ There are four ways to log onto Steam:
 		- `dontRememberMachine`
 		- `webLogonToken`
 		- `steamID`
-- Individually using account name and [client logon token obtained from the web](https://github.com/DoctorMcKay/node-steamcommunity/wiki/SteamCommunity#getclientlogontokencallback)
+- Individually using account name and [client logon token obtained from the web](https://github.com/DoctorMcKay/node-steamcommunity/wiki/SteamCommunity#getclientlogontokencallback) (deprecated)
 	- **NOTE:** If you log on this way, [`webSession`](#websession) will **NOT** be emitted automatically, and you will need to use [`webLogOn()`](#weblogon) to get a web session.
 	- These properties are required:
 		- `accountName`
@@ -536,7 +609,22 @@ There are four ways to log onto Steam:
 		- `rememberPassword`
 		- `logonID`
 		- `machineName`
-		- `clientOS` 
+		- `clientOS`
+
+#### Using Refresh Tokens
+
+As of the 2022-08-24 Steam Client beta, the Steam client now uses refresh tokens when logging on. You can obtain a
+refresh token using the [steam-session module](https://www.npmjs.com/package/steam-session).
+
+As of 2022-09-03, refresh tokens are JWTs that are valid for ~200 days. You can keep using the same refresh token to log
+on until it expires. You can find out when a token expires by [decoding it](https://www.npmjs.com/search?q=jwt) and checking
+the `exp` property, which is a Unix timestamp indicating when the token expires.
+
+If you attempt to log on using a refresh token that isn't valid for use with client logins, the app will crash with a
+relevant error message.
+
+All other ways of authenticating to an individual user account should be considered deprecated, although steam-user will
+continue to support them as long as they keep working on the Steam backend.
 
 ### logOff()
 
@@ -546,10 +634,13 @@ Logs you off of Steam and closes the connection.
 
 **v3.18.0 or later is required to use this method**
 
-Logs you off of Steam and then immediately back on. If you aren't logged into an anonymous account, then you **must**
-set `rememberPassword` to `true` when logging on initially to use this. You also **must** wait for the
-[`loginKey`](#loginkey) event to be emitted before you can use this. Attempts to call this method without both
-criteria being met will result in an `Error` being thrown and nothing else will happen.
+Logs you off of Steam and then immediately back on. This can only be used if one of the following criteria are met:
+
+- You're logged into an anonymous account
+- You're logged into an individual account, you set `rememberPassword` to `true` when you logged on, and the `loginKey` event has been emitted
+- You're logged into an individual account and you used a `refreshToken` to log on
+
+Attempts to call this method under any other circumstance will result in an `Error` being thrown and nothing else will happen.
 
 When used, `disconnected` and then `loggedOn` will be emitted in succession. This is essentially the same as using
 `logOff()` and then calling `logOn()` immediately in the `disconnected` event callback.
@@ -660,8 +751,11 @@ Retrieves your account's privacy settings. You can't change your privacy state u
 ### kickPlayingSession([callback])
 - `callback` - Optional. A function to be called once Steam receives and responds to this request.
     - `err` - An `Error` object on failure, or `null` on success
+	- `response` - The response object
+	    - `playingApp` - This is the AppID of the game that was being played elsewhere
 
-**v3.21.0 or later is required to use this method**
+**v3.21.0 or later is required to use this method**  
+**v4.22.0 or later is required to read `playingApp` in the callback**
 
 If this account is being used to play a game on another logon session, calling this method will kick that other session
 off of Steam entirely (it will get an `error` event if the other session is using node-steam-user).
@@ -802,68 +896,120 @@ If you have the PICS cache enabled and the risk of getting stale data is accepta
 
 Access tokens are global. That is, everyone who has access to an app receives the same token. Tokens do not seem to expire.
 
-### getOwnedApps([excludeSharedLicenses])
-- `excludeSharedLicenses` - Pass `true` to exclude apps that are owned via a shared license, and not directly on this account (default `false`)
+### getOwnedApps([filter])
+- `filter` - A filter object or function (see [`ownershipFilter`](#ownershipfilter))
 
 **v3.3.0 or later is required to use this method**  
-**v4.7.0 or later is required to use `excludeSharedLicenses`**
+**v4.7.0 or later is required to use `excludeSharedLicenses`**  
+**v4.22.0 or later is required to use `filter`**
 
-Returns an array of AppIDs which your account owns. This cannot be safely called until `appOwnershipCached` is emitted.
+Returns an array of AppIDs which your account owns. This cannot be safely called until `ownershipCached` is emitted.
 
 `enablePicsCache` must be `true` to use this method. Otherwise, an `Error` will be thrown.
 
-### ownsApp(appid[, excludeSharedLicenses])
+If `filter` is a boolean, it is interpreted as `excludeShared` for backward compatibility. For example,
+`getOwnedApps(true)` is the same as `getOwnedApps({excludeShared: true})`.
+This usage is deprecated and will be removed in a future release.
+
+The output of this function will contain all AppIDs that are present in at least one license that was not filtered out.
+For example, if you previously activated a free on demand package for Spacewar but later activated a retail CD key for
+the same, it will be included if you pass `{excludeFree: true}` as your filter since you own it both via a free package
+and via a paid package.
+
+### ownsApp(appid[, filter])
 - `appid` - A numeric AppID
-- `excludeSharedLicenses` - Pass `true` to exclude apps that are owned via a shared license, and not directly on this account (default `false`)
+- `filter` - A filter object or function (see [`ownershipFilter`](#ownershipfilter))
 
 **v3.3.0 or later is required to use this method**  
-**v4.7.0 or later is required to use `excludeSharedLicenses`**
+**v4.7.0 or later is required to use `excludeSharedLicenses`**  
+**v4.22.0 or later is required to use `filter`**
 
 Returns `true` if your account owns the specified AppID, or `false` if not. This cannot be safely called until
-`appOwnershipCached` is emitted.
+`ownershipCached` is emitted.
 
 `enablePicsCache` must be `true` to use this method. Otherwise, an `Error` will be thrown.
 
-### getOwnedDepots([excludeSharedLicenses])
-- `excludeSharedLicenses` - Pass `true` to exclude depots that are owned via a shared license, and not directly on this account (default `false`)
+If `filter` is a boolean, it is interpreted as `excludeShared` for backward compatibility. For example,
+`ownsApp(730, true)` is the same as `ownsApp(730, {excludeShared: true})`.
+This usage is deprecated and will be removed in a future release.
+
+The output of this function will be true if the provided AppID is present in at least one license that was not filtered out.
+
+### getOwnedDepots([filter])
+- `filter` - A filter object or function (see [`ownershipFilter`](#ownershipfilter))
 
 **v3.3.0 or later is required to use this method**  
-**v4.7.0 or later is required to use `excludeSharedLicenses`**
+**v4.7.0 or later is required to use `excludeSharedLicenses`**  
+**v4.22.0 or later is required to use `filter`**
 
-Returns an array of depot IDs which your account owns. This cannot be safely called until `appOwnershipCached` is emitted.
+Returns an array of depot IDs which your account owns. This cannot be safely called until `ownershipCached` is emitted.
 
 `enablePicsCache` must be `true` to use this method. Otherwise, an `Error` will be thrown.
 
-### ownsDepot(depotid[, excludeSharedLicenses])
+If `filter` is a boolean, it is interpreted as `excludeShared` for backward compatibility. For example,
+`getOwnedDepots(true)` is the same as `getOwnedDepots({excludeShared: true})`.
+This usage is deprecated and will be removed in a future release.
+
+The output of this function will contain all depot IDs that are present in at least one license that was not filtered out.
+
+### ownsDepot(depotid[, filter])
 - `depotid` - A numeric depot ID
-- `excludeSharedLicenses` - Pass `true` to exclude depots that are owned via a shared license, and not directly on this account (default `false`)
+- `filter` - A filter object or function (see [`ownershipFilter`](#ownershipfilter))
 
 **v3.3.0 or later is required to use this method**  
-**v4.7.0 or later is required to use `excludeSharedLicenses`**
+**v4.7.0 or later is required to use `excludeSharedLicenses`**  
+**v4.22.0 or later is required to use `filter`**
 
 Returns `true` if your account owns the specified depot, or `false` if not. This cannot be safely called until
-`appOwnershipCached` is emitted.
+`ownershipCached` is emitted.
 
 `enablePicsCache` must be `true` to use this method. Otherwise, an `Error` will be thrown.
 
-### getOwnedPackages([excludeSharedLicenses])
-- `excludeSharedLicenses` - Pass `true` to exclude packages that are owned via a shared license, and not directly on this account (default `false`)
+If `filter` is a boolean, it is interpreted as `excludeShared` for backward compatibility. For example,
+`ownsDepot(731, true)` is the same as `ownsDepot(731, {excludeShared: true})`.
+This usage is deprecated and will be removed in a future release.
+
+The output of this function will be true if the provided depot ID is present in at least one license that was not filtered out.
+
+### getOwnedPackages([filter])
+- `filter` - A filter object or function (see [`ownershipFilter`](#ownershipfilter))
 
 **v3.3.0 or later is required to use this method**  
-**v4.7.0 or later is required to use `excludeSharedLicenses`**
+**v4.7.0 or later is required to use `excludeSharedLicenses`**  
+**v4.22.0 or later is required to use `filter`**
 
-Returns an array of package IDs which your account owns. If you logged in anonymously, this can be safely called
-immediately following logon. Otherwise, this cannot be safely called until `licenses` is emitted.
+Returns an array of package IDs which your account owns.
 
-### ownsPackage(packageid[, excludeSharedLicenses])
+If `filter` is a boolean, it is interpreted as `excludeShared` for backward compatibility. For example,
+`getOwnedPackages(true)` is the same as `getOwnedPackages({excludeShared: true})`.
+This usage is deprecated and will be removed in a future release.
+
+The output of this function will contain all package IDs for which you have at least one license that was not filtered out.
+
+The point at which this method can be called depends on the following:
+
+- If you are logged on anonymously, this can be called immediately following the `loggedOn` event
+- If you are using no filters, or if you're using the `excludeShared` filter and no other filters, this can be called immediately following the `licenses` event
+- If you are using a custom filter function or if you're using the `excludeFree` and/or `excludeExpiring` filters, this can be called immediately following the `ownershipCached` event (which means `enablePicsCache` must be true)
+
+### ownsPackage(packageid[, filter])
 - `packageid` - A numeric package ID
-- `excludeSharedLicenses` - Pass `true` to exclude packages that are owned via a shared license, and not directly on this account (default `false`)
+- `filter` - A filter object or function (see [`ownershipFilter`](#ownershipfilter))
 
 **v3.3.0 or later is required to use this method**  
-**v4.7.0 or later is required to use `excludeSharedLicenses`**
+**v4.7.0 or later is required to use `excludeSharedLicenses`**  
+**v4.22.0 or later is required to use `filter`**
 
-Returns `true` if your account owns the specified package ID, or `false` if not. If you logged in anonymously, this can
-be safely called immediately following logon. Otherwise, this cannot be safely called until `licenses` is emitted.
+Returns `true` if your account owns the specified package ID, or `false` if not.
+
+The output of this function will be true if your account has at least one license for the provided package ID that wasn't
+filtered out.
+
+The same timing requirements apply to this method as apply to [`getOwnedPackages`](#getownedpackagesfilter).
+
+If `filter` is a boolean, it is interpreted as `excludeShared` for backward compatibility. For example,
+`ownsPackage(16018, true)` is the same as `ownsPackage(16018, {excludeShared: true})`.
+This usage is deprecated and will be removed in a future release.
 
 ### getStoreTagNames(language, tagIDs, callback)
 - `language` - The language you want tag names in, e.g. "english" or "spanish"
@@ -1194,6 +1340,17 @@ Retrieves a user's list of owned apps. The user's games must not be private.
 
 *This is functionally identical to [IPlayerService/GetOwnedGames](https://steamapi.xpaw.me/#IPlayerService/GetOwnedGames)
 but with some minor data processing.*
+
+### getFriendsThatPlay(appID, callback)
+- `appID` - The ID of the app you want to check
+- `callback` - Called when the request completes.
+    - `err` - An `Error` object on failure, or `null` on success
+    - `response` - The response object
+        - `friends` - An array of `SteamID` objects
+
+**v4.20.0 or later is required to use this method**
+
+Retrieves a list of friends that have played or used an app.
 
 ### getOwnedProfileItems([options,] callback)
 - `options` - Optional. An object with zero or more of these properties:
@@ -1617,7 +1774,24 @@ license(s).
 
 **Please note:** This method is rate-limited to approximately 50 apps per hour.
 
-### getEncryptedAppTicket(appid[, userData], callback)
+**Please note:** This method only works with free-on-demand licenses. Promotional free licenses
+(i.e. "free to keep for a limited time") cannot be requested using this method. You can request such licenses using
+the steamstore module's [addFreeLicense](https://github.com/DoctorMcKay/node-steamstore#addfreelicensesubid-callback) method.
+
+### getLegacyGameKey(appid, callback)
+- `appid` - The Steam AppID of the app for which you want a legacy key
+- `callback` - Called when the request completes
+    - `err` - If there was an error, this is an `Error` object. Otherwise, it's `null`.
+    - `response` - The response object
+        - `key` - Your key, as a string
+
+**v4.24.0 or later is required to use this method**
+
+Requests your legacy CD key for a game in your library. This will only succeed if the game in question uses legacy CD
+keys (usually you'll get a Steam popup when you launch this game presenting you with your key which you can copy and
+paste into the game when prompted).
+
+### createEncryptedAppTicket(appid[, userData], callback)
 - `appid` - The Steam AppID of the app for which you want a ticket
 - `userData` - If the app expects some "user data" (arbitrary data which will be encrypted into the ticket), provide it here. Otherwise, omit this argument or pass an empty Buffer.
 - `callback` - Called when the request completes
@@ -1677,6 +1851,10 @@ This event will be emitted when Steam requests a Steam Guard code from us.
 You should collect the code from the user somehow and then call the `callback` with the code as the sole argument.
 
 If no listener is bound to this event, then `steam-user` will prompt the user for a code via stdin.
+
+**If you are using 2FA, you need to check the `lastCodeWrong` argument.** If it's true, then the last code you provided
+was incorrect (likely already used). In this case, you should wait 30 seconds to allow the TOTP algorithm to generate a
+new code. Failure to do so will result in a login loop, causing your IP address to be temporarily banned.
 
 Example:
 
@@ -1843,14 +2021,18 @@ Only **outstanding** gifts show up here. Gifts that you stored in your inventory
 
 The structure of the objects in the array is defined in the documentation for the [`gifts`](#gifts) property.
 
-### appOwnershipCached
+### ownershipCached
 
-**v3.3.0 or later is required to use this event**
+**v3.3.0 or later is required to use this event under the name `appOwnershipCached`**  
+**v4.22.1 or later is required to use this event under the name `ownershipCached`**
 
 Emitted once we have all data required in order to determine app ownership. You can now safely call `getOwnedApps`,
 `ownsApp`, `getOwnedDepots`, and `ownsDepot`.
 
 This is only emitted if `enablePicsCache` is `true`.
+
+*This event was renamed from `appOwnershipCached` in v4.22.1. It can still be used by the old name, although such usage
+is deprecated and will be removed in a future release.*
 
 ### changelist
 - `changenumber` - The changenumber of the changelist we just received
@@ -2006,27 +2188,33 @@ Emitted when a group posts a new announcement.
 
 ### friendRelationship
 - `sid` - A `SteamID` object for the user whose relationship with us just changed
-- `relationship` - A value from `EFriendRelationship`
+- `relationship` - A value from [`EFriendRelationship`](https://github.com/DoctorMcKay/node-steam-user/blob/master/enums/EFriendRelationship.js)
+- `previousRelationship` - Your previous relationship with this user. This is also a value from [`EFriendRelationship`](https://github.com/DoctorMcKay/node-steam-user/blob/master/enums/EFriendRelationship.js)
 
-**v1.9.0 or later is required to use this event**
+**v1.9.0 or later is required to use this event. v4.20.2 or later is required to use `previousRelationship`**
 
 *This is an [ID event](#id-events).*
 
-Emitted when our relationship with a particular user changes. For example, `EFriendRelationship.RequestRecipient` means that we got invited as a friend, `EFriendRelationship.None` means that we got unfriended.
+Emitted when our relationship with a particular user changes. For example, `EFriendRelationship.RequestRecipient` means
+that we got invited as a friend, and `EFriendRelationship.None` means that we got unfriended.
 
-The [`myFriends`](#myfriends) property isn't yet updated when this is emitted, so you can compare to the old value to see what changed.
+The [`myFriends`](#myfriends) property isn't yet updated when this is emitted, so you can compare to the old value to
+see what changed.
 
 ### groupRelationship
 - `sid` - A `SteamID` object for the group whose relationship with us just changed
-- `relationship` - A value from `EClanRelationship`
+- `relationship` - A value from [`EClanRelationship`](https://github.com/DoctorMcKay/node-steam-user/blob/master/enums/EClanRelationship.js)
+- `previousRelationship` - Your previous relationship with this group. 
+  This is also a value from [`EClanRelationship`](https://github.com/DoctorMcKay/node-steam-user/blob/master/enums/EClanRelationship.js)
 
-**v1.9.0 or later is required to use this event**
+**v1.9.0 or later is required to use this event. v4.20.2 or later is required to use `previousRelationship`**
 
 *This is an [ID event](#id-events).*
 
 Emitted when our relationship with a particular Steam group changes.
 
-The [`myGroups`](#mygroups) property isn't yet updated when this is emitted, so you can compare to the old value to see what changed.
+The [`myGroups`](#mygroups) property isn't yet updated when this is emitted, so you can compare to the old value to
+see what changed.
 
 ### friendsList
 
