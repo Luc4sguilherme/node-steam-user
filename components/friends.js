@@ -976,7 +976,7 @@ class SteamUserFriends extends SteamUserFamilySharing {
 	 * @protected
 	 */
 	_processUserPersona(user) {
-		return new Promise((resolve) => {
+		return new Promise((resolve, reject) => {
 			g_ProcessPersonaSemaphore.wait(async (release) => {
 				try {
 					if (typeof user.last_logoff === 'number') {
@@ -1033,6 +1033,8 @@ class SteamUserFriends extends SteamUserFamilySharing {
 					}
 
 					return resolve(user);
+				} catch (error) {
+					return reject(error)
 				} finally {
 					// always release the lock
 					release();
@@ -1100,7 +1102,7 @@ SteamUserBase.prototype._handlerManager.add(EMsg.ClientPersonaState, function(bo
 					this.users[sid64][i] = processedUser[i];
 				}
 			}
-		});
+		}).catch(() => {});
 	});
 });
 
